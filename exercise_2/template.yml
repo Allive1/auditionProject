@@ -1,0 +1,164 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Lambda application that calls the Lambda API.
+
+Parameters:
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-07d39762,subnet-cc07b3e1
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Default: vpc-76806810
+
+Resources:
+  myLaunchTemplate:
+    Type: AWS::EC2::LaunchTemplate
+    Properties:
+      LaunchTemplateName: !Sub ${AWS::StackName}-launch-template
+      LaunchTemplateData:
+        CreditSpecification:
+          CpuCredits: Unlimited
+        ImageId: ami-0d5eff06f840b45e9
+        InstanceType: t2.micro
+        IamInstanceProfile:
+          Arn: !GetAtt myInstanceProfile.Arn
+        KeyName: test_key
+        Monitoring:
+          Enabled: True
+        SecurityGroupIds:
+          - !Ref mySecurityGroup
+        UserData:
+          Fn::Base64: |
+            #!/bin/bash -xe
+            yum update -y
+            https://s3.amazonaws.com/ec2-downloads-windows/SSMAgent/latest/linux_amd64/amazon-ssm-agent.rpm
+            sudo systemctl enable amazon-ssm-agent
+            sudo systemctl start amazon-ssm-agent
+            yum install -y httpd
+            service httpd start
+
+  myASG:
+    Type: AWS::AutoScaling::AutoScalingGroup
+    Properties:
+      AutoScalingGroupName: myASG
+      MinSize: "1"
+      MaxSize: "6"
+      DesiredCapacity: "2"
+      HealthCheckGracePeriod: 300
+      LaunchTemplate:
+        LaunchTemplateId: !Ref myLaunchTemplate
+        Version: !GetAtt myLaunchTemplate.LatestVersionNumber
+      VPCZoneIdentifier: !Ref Subnets
+      MetricsCollection:
+        - Granularity: "1Minute"
+          Metrics:
+            - "GroupMinSize"
+            - "GroupMaxSize"
+      Tags:
+        - Key: Environment
+          Value: Production
+          PropagateAtLaunch: "true"
+        - Key: Purpose
+          Value: WebServerGroup
+          PropagateAtLaunch: "false"
+      TargetGroupARNs:
+        - !Ref myTargetGroup
+
+  myScaleOutPolicy:
+    Type: AWS::AutoScaling::ScalingPolicy
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref myASG
+      ScalingAdjustment: '1'
+
+  CPUAlarmHigh:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: Average
+      Threshold: '10'
+      AlarmDescription: Alarm if CPU too high or metric disappears indicating instance
+        is down
+      Period: '60'
+      AlarmActions:
+        - !Ref myScaleOutPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: myASG
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization
+
+  myLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: !Ref Subnets
+      SecurityGroups: [ !Ref mySecurityGroup ]
+
+  myTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      VpcId: !Ref VpcId
+      TargetType: instance
+      Port: 80
+      Protocol: HTTP
+
+  myHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref myLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - TargetGroupArn: !Ref myTargetGroup
+          Type: forward
+
+  mySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http on port 80
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  myInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Description: The SSM Instance Profile
+      RoleName: AWSEC2SSMtest
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+            Action:
+              - 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonEC2RoleforSSM
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+      Tags:
+        - Key: "Project"
+          Value: "test-blog"
+        - Key: "Environment"
+          Value: "test"
+        - Key: "createdBy"
+          Value: "Maureen Barasa"
+        - Key: "Name"
+          Value: "AWSEC2SSMtest"
+
+  myInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: AWSEC2SSMtest
+      Roles:
+        - !Ref myInstanceRole
+Outputs:
+  DNSName:
+    Value: !GetAtt myLoadBalancer.DNSName

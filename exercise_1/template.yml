@@ -1,0 +1,114 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: 'AWS::Serverless-2016-10-31'
+Description: An AWS Lambda application that calls the Lambda API.
+
+Parameters:
+  Subnets:
+    Type: List<AWS::EC2::Subnet::Id>
+    Default: subnet-07d39762,subnet-cc07b3e1
+  VpcId:
+      Type: AWS::EC2::VPC::Id
+      Default: vpc-76806810
+
+Resources:
+  myFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: app.lambda_handler
+      Runtime: python3.8
+      CodeUri: fortune_handler/.
+      Description: Call the AWS Lambda API
+      Timeout: 10
+      # Function's execution role
+      Policies:
+        - AWSLambdaBasicExecutionRole
+        - AWSLambda_ReadOnlyAccess
+        - AWSXrayWriteOnlyAccess
+      Tracing: Active
+      Layers:
+        - !Ref libs
+
+  myLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      Subnets: !Ref Subnets
+      SecurityGroups: [ !Ref mySecurityGroup ]
+
+  myTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: myLambdaPermission
+    Properties:
+      TargetType: lambda
+      Targets:
+        - Id: !GetAtt myFunction.Arn
+
+  myHttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref myLoadBalancer
+      Port: 8080
+      Protocol: HTTP
+      DefaultActions:
+        - TargetGroupArn: !Ref myTargetGroup
+          Type: forward
+
+  mySecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allow http on port 80
+      VpcId: !Ref VpcId
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
+          CidrIp: 0.0.0.0/0
+
+  myLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !GetAtt myFunction.Arn
+      Action: lambda:InvokeFunction
+      Principal: elasticloadbalancing.amazonaws.com
+
+  myMetricAlarm:
+    Type: AWS::CloudWatch::Alarm
+    Properties:
+      ActionsEnabled: true
+      AlarmDescription: !Sub 'Lambda Error Alarm for ${myFunction}'
+      AlarmName: !Sub '${myFunction}-Lambda-ErrorAlarm'
+      AlarmActions:
+        - !Sub 'arn:aws:sns:${AWS::Region}:${AWS::AccountId}:${mySnsTopic}'
+      ComparisonOperator: GreaterThanOrEqualToThreshold
+      EvaluationPeriods: 1
+      MetricName: Errors
+      Namespace: AWS/Lambda
+      Statistic: Maximum
+      Threshold: 1
+      DatapointsToAlarm: 1
+      Dimensions:
+        - Name: FunctionName
+          Value: !Sub '${myFunction}'
+      Period: 300
+
+  mySnsTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      DisplayName: !Sub '${myFunction}'
+      Subscription:
+        - Endpoint: 'omari_felix@hotmail.com'
+          Protocol: email
+      TopicName: !Sub '${myFunction}-Topic'
+
+  libs:
+    Type: AWS::Serverless::LayerVersion
+    Properties:
+      LayerName: blank-python-lib
+      Description: Dependencies for the blank-python sample app.
+      ContentUri: package/.
+      CompatibleRuntimes:
+        - python3.8
+
+Outputs:
+  DNSName:
+    Value: !GetAtt myLoadBalancer.DNSName
